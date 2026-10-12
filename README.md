@@ -1,9 +1,9 @@
 # macro-stress-forecaster
 
-**Part 3 of 3:** [macro-stress-pipeline](https://github.com/JaredRudolph/macro-stress-pipeline) | [macro-stress-optimizer](https://github.com/JaredRudolph/macro-stress-optimizer) | macro-stress-forecaster
+**Part 3 of 3:** [macro-stress-pipeline](https://github.com/JRudolphDev/macro-stress-pipeline) | [macro-stress-optimizer](https://github.com/JRudolphDev/macro-stress-optimizer) | macro-stress-forecaster
 
 Third project in a three-part macro stress series. Reads `stress_score.parquet` from
-[macro-stress-pipeline](https://github.com/JaredRudolph/macro-stress-pipeline), trains an
+[macro-stress-pipeline](https://github.com/JRudolphDev/macro-stress-pipeline), trains an
 XGBoost classifier on forward SPY drawdown labels, and writes `forecast.parquet` with a
 per-day drawdown probability.
 
@@ -232,7 +232,7 @@ that 1.0 always means maximum stress. The first 755 rows of each ranked column a
 Requires [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/JaredRudolph/macro-stress-forecaster.git
+git clone https://github.com/JRudolphDev/macro-stress-forecaster.git
 cd macro-stress-forecaster
 uv sync
 ```
