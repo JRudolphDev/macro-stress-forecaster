@@ -1,7 +1,7 @@
 [project]
-name = "macro-stress-forecaster"
+name = "macro-stress"
 version = "0.1.0"
-description = "Macro stress forecaster: re-optimizes indicator weights against forward SPY drawdown labels and trains a classifier to output drawdown probability."
+description = "Macro stress pipeline, SLSQP weight optimizer, and XGBoost drawdown forecaster: a 16-indicator composite stress score from FRED and yfinance, used to estimate SPY drawdown probability."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

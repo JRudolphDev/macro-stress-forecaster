@@ -1,11 +1,23 @@
-# macro-stress-forecaster
+# macro-stress
 
-**Part 3 of 3:** [macro-stress-pipeline](https://github.com/JRudolphDev/macro-stress-pipeline) | [macro-stress-optimizer](https://github.com/JRudolphDev/macro-stress-optimizer) | macro-stress-forecaster
+A three-stage macro stress project: a data pipeline that builds a composite financial stress
+score from 16 leading indicators, a weight optimizer that tunes the score against realized
+SPY drawdowns, and an XGBoost forecaster that turns it into a per-day drawdown probability.
 
-Third project in a three-part macro stress series. Reads `stress_score.parquet` from
-[macro-stress-pipeline](https://github.com/JRudolphDev/macro-stress-pipeline), trains an
-XGBoost classifier on forward SPY drawdown labels, and writes `forecast.parquet` with a
-per-day drawdown probability.
+1. **Pipeline** (`macro_stress_pipeline`): ingests FRED and yfinance data, computes the stress
+   score, writes `stress_score.parquet`.
+2. **Optimizer** (`macro_stress_optimizer`): learns per-indicator weights via SLSQP to maximize
+   AUC against coincident SPY drawdown labels, writes `optimized_weights.json`.
+3. **Forecaster** (`macro_stress_forecaster`): trains an XGBoost classifier on forward SPY
+   drawdown labels, writes `forecast.parquet` with a per-day drawdown probability.
+
+The stress score is a forward-looking risk indicator built from indicators with demonstrated
+leading properties. Reactive and coincident indicators (VIX, SKEW, CPI, USD/CNY, gold/equity
+ratio) were excluded. Optimized weights improve historical fit; they are not a trading signal.
+
+This repo was previously split across three repos (`macro-stress-pipeline`,
+`macro-stress-optimizer`, `macro-stress-forecaster`). The first two are archived; all
+development continues here.
 
 ## Results
 
@@ -18,6 +30,140 @@ The probability signal elevated ahead of every major stress period in the sample
 the 2011 EU debt crisis, the 2015-2016 China slowdown, the 2018 Q4 selloff, COVID, the 2022
 rate hike cycle, and the 2025 tariff shock. The signal drops during sustained bull markets
 and re-elevates as macro conditions deteriorate.
+
+- **Forecaster:** with a 504-day recency half-life, XGBoost reaches CV AUC 0.658 against
+  0.650 for the equal-weight baseline on forward labels. Without recency weighting it falls
+  below the baseline (0.610). See [Stage 3](#stage-3-forecaster).
+- **Optimizer:** SLSQP improves mean CV test AUC from 0.838 (equal weights) to 0.853
+  (optimized, alpha=3.0) on coincident labels. See [Stage 2](#stage-2-weight-optimizer).
+
+## Architecture
+
+```
+Pipeline
+  fetch_data.py      pulls yfinance + FRED
+  process_data.py    merges, resamples, computes ratios
+  features.py        rolling percentile rank, direction flip, composite score
+  pipeline.py        orchestration, writes stress_score.parquet
+
+                     data/processed/stress_score.parquet
+                          |                      |
+                          v                      v
+Optimizer                                Forecaster
+  labels.py     coincident SPY             labels.py      forward SPY drawdown labels
+                drawdown labels                           (lookahead=60, threshold=8%)
+  optimizer.py  SLSQP weight               forecaster.py  48 momentum features,
+                optimization, alpha                       360-combo hyperparameter sweep,
+                sweep, CV evaluation                      XGBoost with recency weighting
+
+  writes optimized_weights.json            writes forecast.parquet
+```
+
+All three packages are installed from `src/` via `pyproject.toml`. The optimizer and
+forecaster do not import from `macro_stress_pipeline` or from each other. The parquet file
+is the only interface between the pipeline and the ML layers.
+
+## Stage 1: Pipeline
+
+The score is a rolling percentile rank (3-year window) averaged across 16 leading indicators,
+normalized so that **1.0 = maximum stress**. It is built exclusively from indicators that tend
+to move ahead of broad market conditions, not reactive or coincident ones. The goal is a
+forward-looking risk signal that leads SPY drawdowns rather than confirming them after the
+fact.
+
+![Macro stress score vs SPY](docs/stress_vs_spy.png)
+
+The composite score is the equal-weight mean of the 16 ranked indicators. It elevates ahead
+of sustained SPY drawdowns and retreats during bull markets.
+
+![Stress score vs SPY drawdown](docs/stress_vs_drawdown.png)
+
+Overlaying the stress score against the normalized SPY drawdown shows the score tends to lead
+the drawdown, not just confirm it. This leading property is what the forecaster is designed
+to exploit.
+
+### Indicators
+
+**Yield curve (FRED)**
+| Series | Indicator |
+|---|---|
+| `T10Y2Y` | 10Y-2Y Treasury spread |
+| `T10Y3M` | 10Y-3M Treasury spread |
+| `T30Y10Y` | 30Y-10Y Treasury spread (computed: `DGS30 - DGS10`) |
+
+**Macro leading (FRED)**
+| Series | Indicator |
+|---|---|
+| `USALOLITOAASTSAM` | OECD composite leading indicator |
+| `UMCSENT` | University of Michigan consumer sentiment |
+| `PERMIT` | Building permits |
+| `NEWORDER` | Manufacturers new orders |
+
+**Labor and credit (FRED)**
+| Series | Indicator |
+|---|---|
+| `ICSA` | Initial jobless claims |
+| `DRCCLACBS` | Credit card delinquency rate |
+| `BAA_SPREAD` | Moody's Baa-10Y spread (computed: `DBAA - DGS10`) |
+
+**Market (yfinance)**
+| Ticker | Indicator |
+|---|---|
+| `XLK` / `XLV` | Tech vs defensive rotation |
+| `TLT` | Long-duration Treasury ETF |
+| `HG=F` | Copper futures (growth proxy) |
+| `CL=F` | Crude oil futures (rate-of-change; dual stress regime) |
+| `EEM` | Emerging markets ETF |
+| `DX-Y.NYB` | DXY dollar index |
+
+Each indicator is percentile-ranked over a 756-day rolling window and direction-flipped so
+that 1.0 always means maximum stress. The first 755 rows of each ranked column are NaN
+(warmup period). `CL=F` uses rate-of-change normalization rather than standard rolling
+percentile rank, since both sharp drops (demand collapse) and sharp spikes (supply shock)
+represent stress conditions.
+
+**Indicator breakdown: most recent observation**
+
+![Indicator breakdown](docs/indicator_breakdown.png)
+
+**Individual indicator percentile ranks**
+
+![Individual indicator percentile ranks](docs/indicator_grid.png)
+
+## Stage 2: Weight optimizer
+
+The optimizer reads `stress_score.parquet` and replaces the equal-weight average with
+data-driven weights via SLSQP optimization, maximizing AUC between the weighted composite
+score and coincident SPY drawdown labels.
+
+On 5,000+ trading days (2006-2026), SLSQP improves mean CV test AUC from **0.838** (equal
+weights) to **0.853** (optimized, alpha=3.0) on a 5-fold time series split. The improvement
+is intentionally modest, as L2 regularization toward equal weights prevents overfitting to
+specific stress regimes on a single 20-year timeline with sparse drawdown events (~26% of
+trading days). The optimized weights are descriptive: they reflect which indicators
+historically led SPY drawdowns, not a forward-looking signal.
+
+**Alpha sweep: test AUC and generalization gap vs regularization strength**
+
+![Alpha sweep](docs/alpha_sweep.png)
+
+**Optimized vs equal-weight indicator weights**
+
+![Weight stability](docs/weight_stability.png)
+
+**ROC curves: equal weight vs optimized**
+
+![ROC curves](docs/roc_curves.png)
+
+**Optimized vs equal-weight score overlaid on SPY**
+
+![Optimized vs equal weight vs SPY](docs/optimized_vs_equalweight_spy.png)
+
+**Optimized vs equal-weight score overlaid on SPY drawdown**
+
+![Optimized vs equal weight vs drawdown](docs/optimized_vs_equalweight_drawdown.png)
+
+## Stage 3: Forecaster
 
 ![Drawdown probability vs SPY drawdown normalized](docs/drawdown_prob_vs_spy_drawdown.png)
 
@@ -57,26 +203,6 @@ indicator's importance.
 The dominance of momentum features over raw rank features throughout the chart validates the
 feature engineering choice: the direction and speed of deterioration matters more than the
 current stress level.
-
-## Input data
-
-The forecaster reads `stress_score.parquet` produced by the pipeline. It contains the raw
-SPY price, the equal-weight composite stress score, and the 16 percentile-ranked indicator
-columns that serve directly as features.
-
-![Macro stress score vs SPY](docs/stress_vs_spy.png)
-
-The composite score is the equal-weight mean of the 16 ranked indicators. It elevates ahead
-of sustained SPY drawdowns and retreats during bull markets.
-
-![Stress score vs SPY drawdown](docs/stress_vs_drawdown.png)
-
-Overlaying the stress score against the normalized SPY drawdown shows the score tends to lead
-the drawdown, not just confirm it. This leading property is what the forecaster is designed
-to exploit: the 16 indicators are selected because they reflect deteriorating macro conditions
-before they show up in equity prices.
-
-## Forecaster Design
 
 ### Labels
 
@@ -119,7 +245,8 @@ weighting. A linear weighted composite was explored first and abandoned: test AU
 ### Recency weighting
 
 Per-fold CV analysis revealed that XGBoost without recency weighting (CV AUC 0.610)
-underperforms the equal-weight baseline (0.650). The gap is not uniform across folds, and fold 5 (2022-2026) drives most of it, with test AUC near random chance. The model memorizes
+underperforms the equal-weight baseline (0.650). The gap is not uniform across folds, and
+fold 5 (2022-2026) drives most of it, with test AUC near random chance. The model memorizes
 GFC and COVID stress patterns and misapplies them to a structurally different regime
 (post-rate-hike recovery, AI bull market, tariff shock).
 
@@ -158,82 +285,13 @@ AUC and Brier score, evaluated via CV. Baseline is the equal-weight stress score
 the 16 ranked indicator columns) evaluated against the same forward labels and CV splits.
 CV metrics are stored in `forecast.parquet` metadata on each run.
 
-## Architecture
-
-```
-Pipeline
-  fetch_data.py      pulls yfinance + FRED
-  process_data.py    merges, resamples, computes ratios
-  features.py        rolling percentile rank, direction flip, composite score
-  pipeline.py        orchestration, writes stress_score.parquet
-
-                     data/processed/stress_score.parquet
-                                      |
-                                      v
-Optimizer
-  labels.py          coincident SPY drawdown labels
-  optimizer.py       SLSQP weight optimization, alpha sweep, CV evaluation
-
-                     data/processed/optimized_weights.json
-                                      |
-                                      v
-Forecaster
-  labels.py          forward SPY drawdown labels (lookahead=60, threshold=8%)
-  forecaster.py      48 momentum features, 360-combo hyperparameter sweep,
-                     XGBoost with recency weighting, writes forecast.parquet
-```
-
-All three packages are installed from `src/` via `pyproject.toml`. The forecaster does not
-import from `macro_stress_optimizer` or `macro_stress_pipeline`. The parquet file is the
-only interface between the pipeline and ML layers.
-
-## Indicators
-
-**Yield curve (FRED)**
-| Series | Indicator |
-|---|---|
-| `T10Y2Y` | 10Y-2Y Treasury spread |
-| `T10Y3M` | 10Y-3M Treasury spread |
-| `T30Y10Y` | 30Y-10Y Treasury spread (computed: `DGS30 - DGS10`) |
-
-**Macro leading (FRED)**
-| Series | Indicator |
-|---|---|
-| `USALOLITOAASTSAM` | OECD composite leading indicator |
-| `UMCSENT` | University of Michigan consumer sentiment |
-| `PERMIT` | Building permits |
-| `NEWORDER` | Manufacturers new orders |
-
-**Labor and credit (FRED)**
-| Series | Indicator |
-|---|---|
-| `ICSA` | Initial jobless claims |
-| `DRCCLACBS` | Credit card delinquency rate |
-| `BAMLH0A0HYM2` | ICE BofA HY OAS spread |
-
-**Market (yfinance)**
-| Ticker | Indicator |
-|---|---|
-| `XLK` / `XLV` | Tech vs defensive rotation |
-| `TLT` | Long-duration Treasury ETF |
-| `HG=F` | Copper futures (growth proxy) |
-| `CL=F` | Crude oil futures (rate-of-change; dual stress regime) |
-| `EEM` | Emerging markets ETF |
-| `DX-Y.NYB` | DXY dollar index |
-
-Each indicator is percentile-ranked over a 756-day rolling window and direction-flipped so
-that 1.0 always means maximum stress. The first 755 rows of each ranked column are NaN
-(warmup period).
-
-![Individual indicator percentile ranks](docs/indicator_grid.png)
-
 ## Setup
 
 Requires [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/JRudolphDev/macro-stress-forecaster.git
-cd macro-stress-forecaster
+git clone https://github.com/JRudolphDev/macro-stress.git
+cd macro-stress
 uv sync
 ```
 
@@ -244,12 +302,6 @@ FRED_API_KEY=your_key_here
 ```
 
 Get a key at [fred.stlouisfed.org](https://fred.stlouisfed.org/docs/api/api_key.html).
-
-```bash
-uv run pytest        # run tests
-uv run ruff check .  # lint
-uv run ruff format . # format
-```
 
 ## Usage
 
@@ -267,7 +319,7 @@ Outputs:
 - `data/raw/market_raw.csv`: raw yfinance closes
 - `data/raw/fred_raw.csv`: raw FRED series
 - `data/processed/stress_score.parquet`: stress score with all ranked indicators and SPY
-- `data/processed/optimized_weights.json`: per-indicator weights optimized against coincident drawdown labels
+- `data/processed/optimized_weights.json`: per-indicator weights, AUC comparison, and run metadata
 - `data/processed/forecast.parquet`: original parquet columns plus `FORWARD_LABEL` and `DRAWDOWN_PROB`
 
 `forecast.parquet` metadata includes `cv_auc`, `cv_brier`, `baseline_auc`, and `best_params`
@@ -275,14 +327,28 @@ from the tuning run.
 
 ## Notebooks
 
-Start with `notebooks/forecaster_xgb.ipynb` for the full forecaster workflow.
+Run the pipeline first to generate `data/processed/stress_score.parquet`, then open a
+notebook in Jupyter or VS Code. Start with `notebooks/forecaster_xgb.ipynb` for the full
+forecaster workflow.
 
-- `notebooks/forecaster_xgb.ipynb`: momentum feature construction, hyperparameter sweep,
-  per-fold CV diagnosis, recency weighting sweep (hl=504 selected), regularization sweep,
-  feature importance, and probability visualization.
+- `notebooks/stress_score_eda.ipynb`: visualizes the pipeline output (stress score vs SPY,
+  indicator breakdown, indicator grid).
+- `notebooks/weight_optimizer.ipynb`: label construction, SLSQP optimization, alpha sweep via
+  cross-validation, weight stability, ROC curves, and optimized score visualization.
 - `notebooks/feature_engineering.ipynb`: systematic sweep over feature families (lags,
   momentum, breadth, volatility, SPY drawdown) and label configurations (lookahead 20-120d,
   threshold 5-20%). Concludes that raw ranks + 21d/63d momentum and 60d/8% labels are the
   best setup at this sample size.
+- `notebooks/forecaster_xgb.ipynb`: momentum feature construction, hyperparameter sweep,
+  per-fold CV diagnosis, recency weighting sweep (hl=504 selected), regularization sweep,
+  feature importance, and probability visualization.
 - `notebooks/forecaster.ipynb`: initial attempt using logistic regression and weight
   re-optimization. Abandoned after test AUC failed to clear the equal-weight baseline.
+
+## Development
+
+```bash
+uv run pytest          # run tests
+uv run ruff check .    # lint
+uv run ruff format .   # format
+```
