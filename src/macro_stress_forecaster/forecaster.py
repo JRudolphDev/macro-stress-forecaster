@@ -12,25 +12,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from xgboost import XGBClassifier
 
 from macro_stress_forecaster.labels import compute_forward_drawdown_labels
-
-INDICATOR_COLS = [
-    "T10Y2Y",
-    "T10Y3M",
-    "T30Y10Y",
-    "USALOLITOAASTSAM",
-    "UMCSENT",
-    "PERMIT",
-    "NEWORDER",
-    "ICSA",
-    "DRCCLACBS",
-    "BAA_SPREAD",
-    "XLK_XLV",
-    "TLT",
-    "HG=F",
-    "CL=F",
-    "EEM",
-    "DX-Y.NYB",
-]
+from macro_stress_pipeline.features import INDICATOR_COLS
 
 DRAWDOWN_THRESHOLD = 0.08
 LOOKAHEAD = 60

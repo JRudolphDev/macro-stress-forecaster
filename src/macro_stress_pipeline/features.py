@@ -27,16 +27,19 @@ FRED_SCORE_COLS = [
     "T10Y2Y",
     "T10Y3M",
     "T30Y10Y",
-    "ICSA",
-    "DRCCLACBS",
     "USALOLITOAASTSAM",
     "UMCSENT",
     "PERMIT",
     "NEWORDER",
+    "ICSA",
+    "DRCCLACBS",
     "BAA_SPREAD",
 ]
 
 SCORE_COLS = MARKET_SCORE_COLS + FRED_SCORE_COLS
+
+# Column order used as model features by the optimizer and forecaster.
+INDICATOR_COLS = FRED_SCORE_COLS + MARKET_SCORE_COLS
 
 ROLLING_WINDOW_DAYS = 756
 

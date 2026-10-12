@@ -60,8 +60,10 @@ Optimizer                                Forecaster
 ```
 
 All three packages are installed from `src/` via `pyproject.toml`. The optimizer and
-forecaster do not import from `macro_stress_pipeline` or from each other. The parquet file
-is the only interface between the pipeline and the ML layers.
+forecaster import only `INDICATOR_COLS` from `macro_stress_pipeline.features`, so the
+indicator list is defined in one place, and they do not import from each other. Apart from
+that constant, the parquet file is the only interface between the pipeline and the ML
+layers.
 
 ## Stage 1: Pipeline
 
@@ -342,8 +344,9 @@ forecaster workflow.
 - `notebooks/forecaster_xgb.ipynb`: momentum feature construction, hyperparameter sweep,
   per-fold CV diagnosis, recency weighting sweep (hl=504 selected), regularization sweep,
   feature importance, and probability visualization.
-- `notebooks/forecaster.ipynb`: initial attempt using logistic regression and weight
-  re-optimization. Abandoned after test AUC failed to clear the equal-weight baseline.
+- `notebooks/archive/forecaster.ipynb`: initial attempt using logistic regression and weight
+  re-optimization. Abandoned after test AUC failed to clear the equal-weight baseline. Kept
+  for reference only.
 
 ## Development
 
